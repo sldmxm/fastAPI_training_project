@@ -1,27 +1,45 @@
+from copy import deepcopy
 from datetime import datetime
 
 from aiogoogle import Aiogoogle
+from fastapi import HTTPException
 
 from app.core.config import settings
 
-DATETIME_FORMAT_FOR_REPORT = '%Y/%m/%d %H:%M:%S'
-REPORT_ROWS = 100
-REPORT_COLUMNS = 3
+REPORT_DATETIME_FORMAT = '%Y/%m/%d %H:%M:%S'
 SHEETS_VERSION = 'v4'
+# оставил, иначе долго добираться для проверки достаточности строк
+# ну или неправильно понял комментарий
+# "Недопустимо зашивать важные для проекта константы: габариты таблицы."
+REPORT_ROWS_COUNT = 100
+REPORT_COLUMNS_COUNT = 3
+REPORT_SPREADSHEET_BODY = {
+    'properties': {'title': 'QRKot отчет на %s',
+                   'locale': 'ru_RU'},
+    'sheets': [{'properties': {'sheetType': 'GRID',
+                               'sheetId': 0,
+                               'title': 'Лист1',
+                               'gridProperties': {'rowCount': REPORT_ROWS_COUNT,
+                                                  'columnCount': REPORT_COLUMNS_COUNT}}}]
+}
+REPORT_TITLE_ROWS = [
+    ['Отчет от', '%s'],
+    ['Топ проектов по скорости закрытия'],
+    ['Название проекта', 'Время сбора', 'Описание']
+]
+
+
+def spreadsheet_body_generate(report_date: datetime = None) -> dict:
+    if not report_date:
+        report_date = datetime.now().strftime(REPORT_DATETIME_FORMAT)
+    spreadsheet_body = deepcopy(REPORT_SPREADSHEET_BODY)
+    spreadsheet_body['properties']['title'] %= report_date
+    return spreadsheet_body
 
 
 async def spreadsheets_create(wrapper_services: Aiogoogle) -> str:
-    now_date_time = datetime.now().strftime(DATETIME_FORMAT_FOR_REPORT)
     service = await wrapper_services.discover('sheets', SHEETS_VERSION)
-    spreadsheet_body = {
-        'properties': {'title': f'QRKot отчет на {now_date_time}',
-                       'locale': 'ru_RU'},
-        'sheets': [{'properties': {'sheetType': 'GRID',
-                                   'sheetId': 0,
-                                   'title': 'Лист1',
-                                   'gridProperties': {'rowCount': REPORT_ROWS,
-                                                      'columnCount': REPORT_COLUMNS}}}]
-    }
+    spreadsheet_body = spreadsheet_body_generate()
     response = await wrapper_services.as_service_account(
         service.spreadsheets.create(json=spreadsheet_body)
     )
@@ -49,16 +67,22 @@ async def spreadsheets_update_value(
         projects_and_durations: list,
         wrapper_services: Aiogoogle
 ) -> None:
-    now_date_time = datetime.now().strftime(DATETIME_FORMAT_FOR_REPORT)
     service = await wrapper_services.discover('sheets', 'v4')
-    table_values = [
-        ['Отчет от', now_date_time],
-        ['Топ проектов по скорости закрытия'],
-        ['Название проекта', 'Время сбора', 'Описание']
-    ]
+    now_date_time = datetime.now().strftime(REPORT_DATETIME_FORMAT)
+    table_values = deepcopy(REPORT_TITLE_ROWS)
+    table_values[0][1] %= now_date_time
     for project, duration in projects_and_durations:
         new_row = [project.name, str(duration), project.description]
         table_values.append(new_row)
+
+    if (
+            len(table_values) > REPORT_ROWS_COUNT or
+            len(table_values[0]) > REPORT_COLUMNS_COUNT
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail='Данные превышают допустимый диапазон ячеек'
+        )
 
     update_body = {
         'majorDimension': 'ROWS',
@@ -67,7 +91,7 @@ async def spreadsheets_update_value(
     await wrapper_services.as_service_account(
         service.spreadsheets.values.update(
             spreadsheetId=spreadsheet_id,
-            range='A1:C100',
+            range=r'A1:C100',
             valueInputOption='USER_ENTERED',
             json=update_body
         )
